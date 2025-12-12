@@ -1,15 +1,20 @@
-import React, { useMemo, useState } from 'react';
-import { Dialog, DialogTrigger } from 'react-aria-components';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Dialog, DialogTrigger, Form } from 'react-aria-components';
 import { Responsive, WidthProvider, type Layout } from 'react-grid-layout';
 import { useHotkeys } from 'react-hotkeys-hook';
 import { Trans, useTranslation } from 'react-i18next';
-import { useLocation } from 'react-router';
+import { useSearchParams, useLocation } from 'react-router';
 
 import { Button } from '@actual-app/components/button';
 import { useResponsive } from '@actual-app/components/hooks/useResponsive';
-import { SvgDotsHorizontalTriple } from '@actual-app/components/icons/v1';
+import {
+  SvgAdd,
+  SvgDotsHorizontalTriple,
+} from '@actual-app/components/icons/v1';
+import { Input } from '@actual-app/components/input';
 import { Menu } from '@actual-app/components/menu';
 import { Popover } from '@actual-app/components/popover';
+import { theme } from '@actual-app/components/theme';
 import { breakpoints } from '@actual-app/components/tokens';
 import { View } from '@actual-app/components/view';
 
@@ -41,7 +46,10 @@ import {
   PageHeader,
 } from '@desktop-client/components/Page';
 import { useAccounts } from '@desktop-client/hooks/useAccounts';
-import { useDashboard } from '@desktop-client/hooks/useDashboard';
+import {
+  useDashboard,
+  useDashboards,
+} from '@desktop-client/hooks/useDashboard';
 import { useFeatureFlag } from '@desktop-client/hooks/useFeatureFlag';
 import { useNavigate } from '@desktop-client/hooks/useNavigate';
 import { useReports } from '@desktop-client/hooks/useReports';
@@ -59,6 +67,52 @@ function isCustomReportWidget(widget: Widget): widget is CustomReportWidget {
   return widget.type === 'custom-report';
 }
 
+function DashboardNameForm({
+  onSubmit,
+  initialName = '',
+  buttonText,
+}: {
+  onSubmit: (name: string) => void;
+  initialName?: string;
+  buttonText: string;
+}) {
+  const [name, setName] = useState(initialName);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  return (
+    <View style={{ padding: 10 }}>
+      <Form
+        onSubmit={e => {
+          e.preventDefault();
+          onSubmit(name);
+        }}
+      >
+        <Input
+          ref={inputRef}
+          value={name}
+          onChangeValue={setName}
+          placeholder="Dashboard Name"
+        />
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'flex-end',
+            marginTop: 10,
+          }}
+        >
+          <Button variant="primary" type="submit">
+            {buttonText}
+          </Button>
+        </View>
+      </Form>
+    </View>
+  );
+}
+
 export function Overview() {
   const { t } = useTranslation();
   const dispatch = useDispatch();
@@ -74,16 +128,44 @@ export function Overview() {
     'mobile' | 'desktop'
   >('desktop');
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { data: dashboards = [], isLoading: isDashboardsLoading } =
+    useDashboards();
+
+  const dashboardIdParam = searchParams.get('dashboardId');
+  const activeDashboard = useMemo(
+    () => dashboards.find(d => d.id === dashboardIdParam) || dashboards[0],
+    [dashboards, dashboardIdParam],
+  );
+
+  const activeDashboardId = activeDashboard?.id;
+
+  useEffect(() => {
+    if (!isDashboardsLoading && dashboards.length > 0 && !activeDashboard) {
+      setSearchParams({ dashboardId: dashboards[0].id });
+    }
+  }, [
+    dashboards,
+    dashboardIdParam,
+    isDashboardsLoading,
+    activeDashboard,
+    setSearchParams,
+  ]);
+
+  const { data: widgets, isLoading: isWidgetsLoading } = useDashboard(
+    activeDashboardId || null,
+  );
+
   const { data: customReports, isLoading: isCustomReportsLoading } =
     useReports();
-  const { data: widgets, isLoading: isWidgetsLoading } = useDashboard();
 
   const customReportMap = useMemo(
     () => new Map(customReports.map(report => [report.id, report])),
     [customReports],
   );
 
-  const isLoading = isCustomReportsLoading || isWidgetsLoading;
+  const isLoading =
+    isCustomReportsLoading || isWidgetsLoading || isDashboardsLoading;
 
   const { isNarrowWidth } = useResponsive();
   const navigate = useNavigate();
@@ -178,8 +260,9 @@ export function Overview() {
   };
 
   const onResetDashboard = async () => {
+    if (!activeDashboardId) return;
     setIsImporting(true);
-    await send('dashboard-reset');
+    await send('dashboard-reset', activeDashboardId);
     setIsImporting(false);
 
     onDispatchSucessNotification(
@@ -210,11 +293,13 @@ export function Overview() {
     type: T['type'],
     meta: T['meta'] = null,
   ) => {
+    if (!activeDashboardId) return;
     send('dashboard-add-widget', {
       type,
       width: 4,
       height: 2,
       meta,
+      dashboardId: activeDashboardId,
     });
   };
 
@@ -260,6 +345,7 @@ export function Overview() {
     );
   };
   const onImport = async () => {
+    if (!activeDashboardId) return;
     const openFileDialog = window.Actual.openFileDialog;
 
     if (!openFileDialog) {
@@ -288,7 +374,10 @@ export function Overview() {
 
     closeNotifications();
     setIsImporting(true);
-    const res = await send('dashboard-import', { filepath });
+    const res = await send('dashboard-import', {
+      filepath,
+      dashboardId: activeDashboardId,
+    });
     setIsImporting(false);
 
     if ('error' in res) {
@@ -346,9 +435,40 @@ export function Overview() {
     });
   };
 
+  const onCreateDashboard = async (name: string) => {
+    const newId = await send('dashboard-create', {
+      name,
+      copyFromId: activeDashboardId,
+    });
+    setSearchParams({ dashboardId: newId });
+  };
+
+  const onRenameDashboard = async (name: string) => {
+    if (activeDashboardId) {
+      await send('dashboard-rename', { id: activeDashboardId, name });
+    }
+  };
+
+  const onDeleteDashboard = async () => {
+    if (activeDashboardId) {
+      if (
+        // eslint-disable-next-line no-restricted-globals
+        confirm(
+          t(
+            'Are you sure you want to delete this dashboard? This action cannot be undone.',
+          ),
+        )
+      ) {
+        await send('dashboard-delete', activeDashboardId);
+        // Switch to first available dashboard (will be handled by useEffect)
+        setSearchParams({});
+      }
+    }
+  };
+
   const accounts = useAccounts();
 
-  if (isLoading) {
+  if (isLoading && !activeDashboard) {
     return <LoadingIndicator message={t('Loading reports...')} />;
   }
 
@@ -358,184 +478,267 @@ export function Overview() {
         isNarrowWidth ? (
           <MobilePageHeader title={t('Reports')} />
         ) : (
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              marginRight: 15,
-            }}
-          >
-            <PageHeader title={t('Reports')} />
-
+          <View>
             <View
               style={{
                 flexDirection: 'row',
                 justifyContent: 'space-between',
-                gap: 5,
+                marginRight: 15,
+                alignItems: 'center',
               }}
             >
-              {currentBreakpoint === 'desktop' && (
-                <>
-                  <DialogTrigger>
-                    <Button variant="primary" isDisabled={isImporting}>
-                      <Trans>Add new widget</Trans>
-                    </Button>
+              <PageHeader title={t('Reports')} />
 
-                    <Popover>
-                      <Dialog>
-                        <Menu
-                          slot="close"
-                          onMenuSelect={item => {
-                            if (item === 'custom-report') {
-                              navigate('/reports/custom');
-                              return;
-                            }
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  gap: 5,
+                }}
+              >
+                {currentBreakpoint === 'desktop' && (
+                  <>
+                    <DialogTrigger>
+                      <Button variant="primary" isDisabled={isImporting}>
+                        <Trans>Add new widget</Trans>
+                      </Button>
 
-                            function isExistingCustomReport(
-                              name: string,
-                            ): name is `custom-report-${string}` {
-                              return name.startsWith('custom-report-');
-                            }
-                            if (isExistingCustomReport(item)) {
-                              const [, reportId] = item.split('custom-report-');
-                              onAddWidget<CustomReportWidget>('custom-report', {
-                                id: reportId,
-                              });
-                              return;
-                            }
+                      <Popover>
+                        <Dialog>
+                          <Menu
+                            slot="close"
+                            onMenuSelect={item => {
+                              if (item === 'custom-report') {
+                                navigate('/reports/custom');
+                                return;
+                              }
 
-                            if (item === 'markdown-card') {
-                              onAddWidget<MarkdownWidget>(item, {
-                                content: `### ${t('Text Widget')}\n\n${t('Edit this widget to change the **markdown** content.')}`,
-                              });
-                              return;
-                            }
-
-                            onAddWidget(item);
-                          }}
-                          items={[
-                            {
-                              name: 'cash-flow-card' as const,
-                              text: t('Cash flow graph'),
-                            },
-                            {
-                              name: 'net-worth-card' as const,
-                              text: t('Net worth graph'),
-                            },
-                            ...(crossoverReportEnabled
-                              ? [
+                              function isExistingCustomReport(
+                                name: string,
+                              ): name is `custom-report-${string}` {
+                                return name.startsWith('custom-report-');
+                              }
+                              if (isExistingCustomReport(item)) {
+                                const [, reportId] =
+                                  item.split('custom-report-');
+                                onAddWidget<CustomReportWidget>(
+                                  'custom-report',
                                   {
-                                    name: 'crossover-card' as const,
-                                    text: t('Crossover point'),
+                                    id: reportId,
                                   },
-                                ]
-                              : []),
-                            {
-                              name: 'spending-card' as const,
-                              text: t('Spending analysis'),
-                            },
-                            {
-                              name: 'markdown-card' as const,
-                              text: t('Text widget'),
-                            },
-                            {
-                              name: 'summary-card' as const,
-                              text: t('Summary card'),
-                            },
-                            {
-                              name: 'calendar-card' as const,
-                              text: t('Calendar card'),
-                            },
-                            ...(formulaMode
-                              ? [
-                                  {
-                                    name: 'formula-card' as const,
-                                    text: t('Formula card'),
-                                  },
-                                ]
-                              : []),
-                            {
-                              name: 'custom-report' as const,
-                              text: t('New custom report'),
-                            },
-                            ...(customReports.length
-                              ? ([Menu.line] satisfies Array<typeof Menu.line>)
-                              : []),
-                            ...customReports.map(report => ({
-                              name: `custom-report-${report.id}` as const,
-                              text: report.name,
-                            })),
-                          ]}
+                                );
+                                return;
+                              }
+
+                              if (item === 'markdown-card') {
+                                onAddWidget<MarkdownWidget>(item, {
+                                  content: `### ${t('Text Widget')}\n\n${t('Edit this widget to change the **markdown** content.')}`,
+                                });
+                                return;
+                              }
+
+                              onAddWidget(item);
+                            }}
+                            items={[
+                              {
+                                name: 'cash-flow-card' as const,
+                                text: t('Cash flow graph'),
+                              },
+                              {
+                                name: 'net-worth-card' as const,
+                                text: t('Net worth graph'),
+                              },
+                              ...(crossoverReportEnabled
+                                ? [
+                                    {
+                                      name: 'crossover-card' as const,
+                                      text: t('Crossover point'),
+                                    },
+                                  ]
+                                : []),
+                              {
+                                name: 'spending-card' as const,
+                                text: t('Spending analysis'),
+                              },
+                              {
+                                name: 'markdown-card' as const,
+                                text: t('Text widget'),
+                              },
+                              {
+                                name: 'summary-card' as const,
+                                text: t('Summary card'),
+                              },
+                              {
+                                name: 'calendar-card' as const,
+                                text: t('Calendar card'),
+                              },
+                              ...(formulaMode
+                                ? [
+                                    {
+                                      name: 'formula-card' as const,
+                                      text: t('Formula card'),
+                                    },
+                                  ]
+                                : []),
+                              {
+                                name: 'custom-report' as const,
+                                text: t('New custom report'),
+                              },
+                              ...(customReports.length
+                                ? ([
+                                    Menu.line,
+                                  ] satisfies Array<typeof Menu.line>)
+                                : []),
+                              ...customReports.map(report => ({
+                                name: `custom-report-${report.id}` as const,
+                                text: report.name,
+                              })),
+                            ]}
+                          />
+                        </Dialog>
+                      </Popover>
+                    </DialogTrigger>
+
+                    {isEditing ? (
+                      <Button
+                        isDisabled={isImporting}
+                        onPress={() => setIsEditing(false)}
+                      >
+                        <Trans>Finish editing dashboard</Trans>
+                      </Button>
+                    ) : (
+                      <Button
+                        isDisabled={isImporting}
+                        onPress={() => setIsEditing(true)}
+                      >
+                        <Trans>Edit dashboard</Trans>
+                      </Button>
+                    )}
+
+                    <DialogTrigger>
+                      <Button variant="bare" aria-label={t('Menu')}>
+                        <SvgDotsHorizontalTriple
+                          width={15}
+                          height={15}
+                          style={{ transform: 'rotateZ(90deg)' }}
                         />
-                      </Dialog>
-                    </Popover>
-                  </DialogTrigger>
+                      </Button>
+                      <Popover>
+                        <Dialog>
+                          <Menu
+                            slot="close"
+                            onMenuSelect={item => {
+                              switch (item) {
+                                case 'reset':
+                                  onResetDashboard();
+                                  break;
+                                case 'export':
+                                  onExport();
+                                  break;
+                                case 'import':
+                                  onImport();
+                                  break;
+                                case 'delete':
+                                  onDeleteDashboard();
+                                  break;
+                              }
+                            }}
+                            items={[
+                              {
+                                name: 'reset',
+                                text: t('Reset to default'),
+                                disabled: isImporting,
+                              },
+                              Menu.line,
+                              {
+                                name: 'import',
+                                text: t('Import'),
+                                disabled: isImporting,
+                              },
+                              {
+                                name: 'export',
+                                text: t('Export'),
+                                disabled: isImporting,
+                              },
+                              Menu.line,
+                              {
+                                name: 'delete',
+                                text: t('Delete dashboard'),
+                                disabled: isImporting || dashboards.length <= 1,
+                              },
+                            ]}
+                          />
+                        </Dialog>
+                      </Popover>
+                    </DialogTrigger>
+                  </>
+                )}
+              </View>
+            </View>
 
-                  {isEditing ? (
-                    <Button
-                      isDisabled={isImporting}
-                      onPress={() => setIsEditing(false)}
-                    >
-                      <Trans>Finish editing dashboard</Trans>
-                    </Button>
-                  ) : (
-                    <Button
-                      isDisabled={isImporting}
-                      onPress={() => setIsEditing(true)}
-                    >
-                      <Trans>Edit dashboard</Trans>
-                    </Button>
-                  )}
+            {/* Dashboard Tabs */}
+            <View
+              style={{
+                flexDirection: 'row',
+                gap: 5,
+                marginTop: 10,
+                alignItems: 'center',
+              }}
+            >
+              {dashboards.map(dashboard => (
+                <Button
+                  key={dashboard.id}
+                  variant={
+                    activeDashboardId === dashboard.id ? 'primary' : 'normal'
+                  }
+                  onPress={() => setSearchParams({ dashboardId: dashboard.id })}
+                >
+                  {dashboard.name}
+                </Button>
+              ))}
 
-                  <DialogTrigger>
-                    <Button variant="bare" aria-label={t('Menu')}>
-                      <SvgDotsHorizontalTriple
-                        width={15}
-                        height={15}
-                        style={{ transform: 'rotateZ(90deg)' }}
+              <DialogTrigger>
+                <Button variant="bare" aria-label={t('Add dashboard')}>
+                  <SvgAdd width={15} height={15} />
+                </Button>
+                <Popover>
+                  <Dialog>
+                    {({ close }) => (
+                      <DashboardNameForm
+                        buttonText={t('Add')}
+                        onSubmit={name => {
+                          onCreateDashboard(name);
+                          close();
+                        }}
                       />
-                    </Button>
-                    <Popover>
-                      <Dialog>
-                        <Menu
-                          slot="close"
-                          onMenuSelect={item => {
-                            switch (item) {
-                              case 'reset':
-                                onResetDashboard();
-                                break;
-                              case 'export':
-                                onExport();
-                                break;
-                              case 'import':
-                                onImport();
-                                break;
-                            }
-                          }}
-                          items={[
-                            {
-                              name: 'reset',
-                              text: t('Reset to default'),
-                              disabled: isImporting,
-                            },
-                            Menu.line,
-                            {
-                              name: 'import',
-                              text: t('Import'),
-                              disabled: isImporting,
-                            },
-                            {
-                              name: 'export',
-                              text: t('Export'),
-                              disabled: isImporting,
-                            },
-                          ]}
-                        />
-                      </Dialog>
-                    </Popover>
-                  </DialogTrigger>
-                </>
-              )}
+                    )}
+                  </Dialog>
+                </Popover>
+              </DialogTrigger>
+
+              <DialogTrigger>
+                <Button
+                  variant="bare"
+                  aria-label={t('Rename dashboard')}
+                  isDisabled={!activeDashboardId}
+                >
+                  <Trans>Rename</Trans>
+                </Button>
+                <Popover>
+                  <Dialog>
+                    {({ close }) => (
+                      <DashboardNameForm
+                        initialName={activeDashboard?.name}
+                        buttonText={t('Save')}
+                        onSubmit={name => {
+                          onRenameDashboard(name);
+                          close();
+                        }}
+                      />
+                    )}
+                  </Dialog>
+                </Popover>
+              </DialogTrigger>
             </View>
           </View>
         )
